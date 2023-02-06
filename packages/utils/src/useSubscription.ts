@@ -119,7 +119,7 @@ export function useSubscription<TData, TError, R = TData>(
           return;
         }
         const { query, type } = event;
-        if (type === "queryRemoved") {
+        if (type === "removed") {
           queryCacheUnsubscribe(subscriptionHash);
           firestoreUnsubscribe(subscriptionHash);
           delete subscriptionInfos[subscriptionHash];
