@@ -15,9 +15,8 @@
  *
  */
 import { Unsubscribe as AuthUnsubscribe } from "firebase/auth";
-import { Unsubscribe as FirestoreUnsubscribe } from "firebase/firestore";
 import { Unsubscribe as DatabaseUnsubscribe } from "firebase/database";
-import { useEffect } from "react";
+import { Unsubscribe as FirestoreUnsubscribe } from "firebase/firestore";
 import {
   hashQueryKey,
   QueryFunction,
@@ -30,22 +29,36 @@ import {
 
 type Unsubscribe = AuthUnsubscribe | FirestoreUnsubscribe | DatabaseUnsubscribe;
 
-const unsubscribes: Record<string, any> = {};
-const observerCount: Record<string, number> = {};
-const eventCount: Record<string, number> = {};
+const subscriptionInfos: Record<string, {
+  firestoreUnsubscribe?: any,
+  queryCacheUnsubscribe?: () => void,
+  eventCount?: number,
+}> = {};
 
 interface CancellablePromise<T = void> extends Promise<T> {
   cancel?: () => void;
 }
 
-type UseSubscriptionOptions<TData, TError, R> = UseQueryOptions<
-  TData,
+type UseSubscriptionOptions<TData, TError, R> = UseQueryOptions<TData,
   TError,
-  R
-> & {
+  R> & {
   onlyOnce?: boolean;
-  fetchFn?: () => Promise<TData>;
+  fetchFn?: () => Promise<TData | null>;
 };
+
+function firestoreUnsubscribe(subscriptionHash: string) {
+  const { firestoreUnsubscribe } = subscriptionInfos[subscriptionHash];
+  if (firestoreUnsubscribe && typeof firestoreUnsubscribe === "function") {
+    firestoreUnsubscribe();
+  }
+}
+
+function queryCacheUnsubscribe(subscriptionHash: string) {
+  const { queryCacheUnsubscribe } = subscriptionInfos[subscriptionHash];
+  if (queryCacheUnsubscribe) {
+    queryCacheUnsubscribe();
+  }
+}
 
 /**
  * Utility hook to subscribe to events, given a function that returns an observer callback.
@@ -65,32 +78,10 @@ export function useSubscription<TData, TError, R = TData>(
   const subscriptionHash = hashFn(subscriptionKey);
   const queryClient = useQueryClient();
 
-  if (!options?.onlyOnce) {
-    // if it's a subscription, we have at least one observer now
-    observerCount[subscriptionHash] ??= 1;
-  }
-
-  function cleanupSubscription(subscriptionHash: string) {
-    if (observerCount[subscriptionHash] === 1) {
-      const unsubscribe = unsubscribes[subscriptionHash];
-      unsubscribe();
-      delete unsubscribes[subscriptionHash];
-      delete eventCount[subscriptionHash];
-    }
-  }
-
-  useEffect(() => {
-    if (!options?.onlyOnce) {
-      observerCount[subscriptionHash] += 1;
-      return () => {
-        observerCount[subscriptionHash] -= 1;
-        cleanupSubscription(subscriptionHash);
-      };
-    }
-  }, []);
 
   let resolvePromise: (data: TData | null) => void = () => null;
   let rejectPromise: (err: any) => void = () => null;
+
   const result: CancellablePromise<TData | null> = new Promise<TData | null>(
     (resolve, reject) => {
       resolvePromise = resolve;
@@ -102,39 +93,68 @@ export function useSubscription<TData, TError, R = TData>(
     queryClient.invalidateQueries(queryKey);
   };
 
-  let unsubscribe: Unsubscribe;
-  if (!options?.onlyOnce) {
-    if (unsubscribes[subscriptionHash]) {
-      unsubscribe = unsubscribes[subscriptionHash];
-      const old = queryClient.getQueryData<TData | null>(queryKey);
-
-      resolvePromise(old || null);
-    } else {
-      unsubscribe = subscribeFn(async (data) => {
-        eventCount[subscriptionHash] ??= 0;
-        eventCount[subscriptionHash]++;
-        if (eventCount[subscriptionHash] === 1) {
-          resolvePromise(data || null);
-        } else {
-          queryClient.setQueryData(queryKey, data);
-        }
-      });
-      unsubscribes[subscriptionHash] = unsubscribe;
-    }
-  } else {
+  if (options?.onlyOnce) {
     if (!options.fetchFn) {
       throw new Error("You must specify fetchFn if using onlyOnce mode.");
     } else {
-      options
-        .fetchFn()
-        .then(resolvePromise)
-        .catch((err) => {
-          rejectPromise(err);
-        });
+      const enabled = options?.enabled ?? true;
+      if (enabled) {
+        options
+          .fetchFn()
+          .then(resolvePromise)
+          .catch((err) => {
+            rejectPromise(err);
+          });
+      }
+    }
+  } else {
+    subscriptionInfos[subscriptionHash] ??= {};
+    const subscriptionInfo = subscriptionInfos[subscriptionHash];
+    const subscribedToQueryCache = !!subscriptionInfo.queryCacheUnsubscribe;
+
+    if (!subscribedToQueryCache) {
+      const queryCache = queryClient.getQueryCache();
+      subscriptionInfo.queryCacheUnsubscribe = queryCache.subscribe((event) => {
+        if (!event || event.query.queryHash !== hashFn(queryKey)) {
+          return;
+        }
+        const { query, type } = event;
+        if (type === "queryRemoved") {
+          queryCacheUnsubscribe(subscriptionHash);
+          firestoreUnsubscribe(subscriptionHash);
+          delete subscriptionInfos[subscriptionHash];
+        }
+        if (type === "observerAdded" || type === "observerRemoved") {
+          const observersCount = query.getObserversCount();
+          if (observersCount === 0) {
+            firestoreUnsubscribe(subscriptionHash);
+          } else {
+            const isSubscribedToFirestore = !!subscriptionInfo.firestoreUnsubscribe;
+            if (isSubscribedToFirestore) {
+              const cachedData = queryClient.getQueryData<TData | null>(queryKey);
+              const hasData = !!subscriptionInfo.eventCount;
+
+              if (hasData) {
+                resolvePromise(cachedData ?? null);
+              }
+            } else {
+              subscriptionInfo.firestoreUnsubscribe = subscribeFn(async (data) => {
+                subscriptionInfo.eventCount ??= 0;
+                subscriptionInfo.eventCount++;
+                if (subscriptionInfo.eventCount === 1) {
+                  resolvePromise(data || null);
+                } else {
+                  queryClient.setQueryData(queryKey, data);
+                }
+              });
+            }
+          }
+        }
+      });
     }
   }
 
-  const queryFn: QueryFunction<TData, QueryKey> = () => {
+  const queryFn: QueryFunction<TData> = () => {
     return result as Promise<TData>;
   };
 
