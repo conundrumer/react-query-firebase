@@ -31,21 +31,21 @@ import {
 import { getQuerySnapshot, GetSnapshotSource } from "./index";
 
 export function useFirestoreInfiniteQuery<
-  T = DocumentData,
-  R = QuerySnapshot<T>
+  T = DocumentData
 >(
   key: QueryKey,
   initialQuery: Query<T>,
   getNextQuery: (snapshot: QuerySnapshot<T>) => Query<T> | undefined,
+  getPreviousQuery: (snapshot: QuerySnapshot<T>) => Query<T> | undefined,
   options?: {
     source?: GetSnapshotSource;
   },
   useInfiniteQueryOptions?: Omit<
-    UseInfiniteQueryOptions,
-    "queryFn" | "getNextPageParam"
+    UseInfiniteQueryOptions<QuerySnapshot<T>, FirestoreError>,
+    "queryFn" | "getNextPageParam" | "getPreviousPageParam"
   >
-): UseInfiniteQueryResult<R, FirestoreError> {
-  return useInfiniteQuery<QuerySnapshot<T>, FirestoreError, R>({
+): UseInfiniteQueryResult<QuerySnapshot<T>, FirestoreError> {
+  return useInfiniteQuery<QuerySnapshot<T>, FirestoreError>({
     queryKey: useInfiniteQueryOptions?.queryKey ?? key,
     async queryFn(ctx: QueryFunctionContext<QueryKey, Query<T>>) {
       const query: Query<T> = ctx.pageParam ?? initialQuery;
@@ -54,5 +54,9 @@ export function useFirestoreInfiniteQuery<
     getNextPageParam(snapshot) {
       return getNextQuery(snapshot);
     },
+    getPreviousPageParam(snapshot) {
+      return getPreviousQuery(snapshot);
+    },
+    ...useInfiniteQueryOptions,
   });
 }
