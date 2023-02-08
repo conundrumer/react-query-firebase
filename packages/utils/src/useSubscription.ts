@@ -30,6 +30,7 @@ import {
 type Unsubscribe = AuthUnsubscribe | FirestoreUnsubscribe | DatabaseUnsubscribe;
 
 const subscriptionInfos: Record<string, {
+  result?: CancellablePromise<any>;
   firestoreUnsubscribe?: any,
   queryCacheUnsubscribe?: () => void,
   eventCount?: number,
@@ -82,7 +83,7 @@ export function useSubscription<TData, TError, R = TData>(
   let resolvePromise: (data: TData | null) => void = () => null;
   let rejectPromise: (err: any) => void = () => null;
 
-  const result: CancellablePromise<TData | null> = new Promise<TData | null>(
+  let result: CancellablePromise<TData | null> = new Promise<TData | null>(
     (resolve, reject) => {
       resolvePromise = resolve;
       rejectPromise = reject;
@@ -113,6 +114,7 @@ export function useSubscription<TData, TError, R = TData>(
     const subscribedToQueryCache = !!subscriptionInfo.queryCacheUnsubscribe;
 
     if (!subscribedToQueryCache) {
+      subscriptionInfo.result = result
       const queryCache = queryClient.getQueryCache();
       subscriptionInfo.queryCacheUnsubscribe = queryCache.subscribe((event) => {
         if (!event || event.query.queryHash !== hashFn(queryKey)) {
@@ -151,6 +153,8 @@ export function useSubscription<TData, TError, R = TData>(
           }
         }
       });
+    } else {
+      result = subscriptionInfo.result as CancellablePromise<any>
     }
   }
 
